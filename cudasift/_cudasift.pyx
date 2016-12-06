@@ -59,7 +59,7 @@ cdef extern from "cudaImage.h" nogil:
 cdef extern from "cudaSift.h" nogil:
     ctypedef struct SiftPoint:
         float xpos
-        float ypos   
+        float ypos
         float scale
         float sharpness
         float edgeness
@@ -73,7 +73,7 @@ cdef extern from "cudaSift.h" nogil:
         float subsampling
         float empty[3]
         float data[128]
-    
+
     ctypedef struct SiftData:
         int numPts
         int maxPts
@@ -81,46 +81,56 @@ cdef extern from "cudaSift.h" nogil:
         SiftPoint *d_data
     cdef void InitCuda(int devNum)
     cdef void ExtractSift(
-        SiftData &siftData, CudaImage &img, int numOctaves, 
-        double initBlur, float thresh, float lowestScale, 
+        SiftData &siftData, CudaImage &img, int numOctaves,
+        double initBlur, float thresh, float lowestScale,
         float subsampling)
     cdef void InitSiftData(SiftData &data, int num, bool host, bool dev)
     cdef void FreeSiftData(SiftData &data)
     cdef void PrintSiftData(SiftData &data)
     cdef double MatchSiftData(SiftData &data1, SiftData &data2)
     cdef double FindHomography(
-        SiftData &data,  float *homography, int *numMatches, 
+        SiftData &data,  float *homography, int *numMatches,
         int numLoops, float minScore, float maxAmbiguity,
         float thresh)
 
-def PyInitCuda(devNum=0):
-    '''Initialize Cuda'''
-    InitCuda(devNum)
-    
-PyInitCuda()
+def PyInitCuda(device_number=0):
+    """
+    Initialize a CUDA GPU
+
+    Parameters
+    ----------
+    device_number : int
+                    The id of the device to initialize.  If the id is greater
+                    than the id request, the GPU with the largest id is
+                    initialized.
+    """
+    InitCuda(device_number)
 
 def checkError(error, msg):
     if error != 0:
         raise RuntimeError("Cuda error %d: %s" % (error, msg))
-        
+
 cdef class PySiftData:
-    '''A wrapper around CudaSift's SiftData'''
+    """
+    A wrapper around CudaSift's SiftData object
+    """
     cdef:
         SiftData data
+
     def __init__(self, int num = 1024):
         with nogil:
             InitSiftData(self.data, num, False, True)
-            
+
     def __deallocate__(self):
         with nogil:
             FreeSiftData(self.data)
-    
+
     def __len__(self):
         return self.data.numPts
-    
+
     def to_data_frame(self):
         '''Convert the device-side SIFT data to a Pandas data frame and array
-        
+
         returns a Pandas data frame with the per-keypoint fields: xpos, ypos,
             scale, sharpness, edgeness, orientation, score and ambiguity
             AND a numpy N x 128 array of the SIFT features per keypoint
@@ -155,7 +165,7 @@ cdef class PySiftData:
             error = cudaHostRegister(<void *>pts, data_size, 0)
             if error == 0:
                 state = 1
-                error = cudaMemcpy(pts, data.d_data, data_size, 
+                error = cudaMemcpy(pts, data.d_data, data_size,
                                    cudaMemcpyDeviceToHost)
                 cudaHostUnregister(pts)
         checkError(error, "during " + ("cudaHostRegister" if state == 0 else "cudaMemcpy"))
@@ -188,16 +198,19 @@ cdef class PySiftData:
             pandas.Series(h_data[:, match_error_off], name="match_error"),
             pandas.Series(h_data[:, subsampling_off], name="subsampling")
             ), axis=1), h_data[:, -128:]
-    
+
     @staticmethod
     def from_data_frame(data_frame, features):
-        '''Set a SiftData from a data frame and feature vector
+        """
+        Set a SiftData from a data frame and feature vector
 
-        :param data_frame: a Pandas data frame with the per-keypoint fields:
-            xpos, ypos, scale, sharpness, edgeness, orientation, score 
-            and ambiguity
-        :param features: a N x 128 array of SIFT features
-        '''
+        data_frame : DataFrame
+                     a Pandas data frame with the per-keypoint fields:
+                     xpos, ypos, scale, sharpness, edgeness, orientation, score
+                     and ambiguity
+        features : ndarray
+                   (n,128) array of SIFT features
+        """
         assert len(data_frame) == len(features)
         self = PySiftData(len(data_frame))
         cdef:
@@ -208,11 +221,11 @@ cdef class PySiftData:
             int error
             size_t data_size
             np.ndarray[np.float32_t, ndim=2, mode='c'] tmp
-        
+
         tmp = np.ascontiguousarray(np.zeros(
             (size, sizeof(SiftPoint) / sizeof(float)),
             dtype="f%d" % sizeof(float)))
-        pts = <SiftPoint *>tmp.data          
+        pts = <SiftPoint *>tmp.data
         xpos_off = <size_t>(&pts.xpos - <float *>pts)
         ypos_off = <size_t>(&pts.ypos - <float *>pts)
         scale_off = <size_t>(&pts.scale - <float *>pts)
@@ -233,31 +246,49 @@ cdef class PySiftData:
         data.numPts = size
         data_size = size * sizeof(SiftPoint)
         with nogil:
-            error = cudaMemcpy(data.d_data, pts, data_size, 
+            error = cudaMemcpy(data.d_data, pts, data_size,
                                    cudaMemcpyHostToDevice)
         checkError(error, "during " + ("cudaHostRegister" if state == 0 else "cudaMemcpy"))
         return self
 
 def ExtractKeypoints(np.ndarray srcImage,
                      PySiftData pySiftData,
-                     int numOctaves = 5, 
+                     int numOctaves = 5,
                      float initBlur = 0,
                      float thresh = 5,
-                     float lowestScale = 0, 
+                     float lowestScale = 0,
                      float subsampling = 1.0):
-    '''Extract keypoints from an image
-    
-    :param img: a Numpy 2d array (probably uint8)
-    :param pySiftData: a :class: `PySiftData` object in which to store pts
-    :param numOctaves: # of octaves to accumulate
-    :param initBlur: the initial Gaussian standard deviation
-    :param thresh: significance threshold for keypoints
-    :param lowestScale:
-    :param subsampling: subsampling in pixels
-    
+    """
+    Extract keypoints from an image
+
+    Parameters
+    ----------
+    srcImage : ndarray
+               (n, m) image array
+
+    pySiftData : object
+                 PySiftData object in which to store pts
+
+    numOctaves : int
+                 # of octaves to accumulate
+
+    initBlur : int
+               the initial Gaussian standard deviation
+
+    thresh : int
+             significance threshold for keypoints
+
+    lowestScale: int
+                 The ?
+
+    subsampling : float
+                  subsampling in pixels
+
+    Returns
+    -------
     returns a pandas data frame of SIFT points and an N x 128 numpy array of
         SIFT features per keypoint
-    '''
+    """
     cdef:
         size_t i
         SiftPoint *pts
@@ -268,7 +299,7 @@ def ExtractKeypoints(np.ndarray srcImage,
         np.ndarray tmp = np.ascontiguousarray(srcImage.astype(np.float32))
         void *pSrc = tmp.data
     with nogil:
-        destImage.Allocate(size_x, size_y, iAlignUp(size_x, 128), 
+        destImage.Allocate(size_x, size_y, iAlignUp(size_x, 128),
                          False, NULL, <float *>pSrc)
         destImage.Download()
     del tmp
@@ -277,5 +308,16 @@ def ExtractKeypoints(np.ndarray srcImage,
                     lowestScale, subsampling)
 
 def PyMatchSiftData(PySiftData data1, PySiftData data2):
+    """
+    Given two PySiftData objects, apply the CUDA matcher.
+
+    Parameters
+    ----------
+    data1 : object
+            PySiftData object
+
+    data2 : object
+            PySiftData object
+    """
     with nogil:
         MatchSiftData(data1.data, data2.data)
