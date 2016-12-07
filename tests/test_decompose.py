@@ -1,7 +1,7 @@
 import os
 import numpy as np
 from scipy.misc import imread
-#import cudasift as cs
+import cudasift as cs
 
 
 def cart2polar(x, y):
@@ -35,7 +35,6 @@ def reproject_image_into_polar(data, origin=None):
     theta[theta < 0] += 2 * np.pi
     return theta
 
-
 def coupled_decomposition(data, originx, originy, M=4, radial_size=720):
     """
     Apply coupled decomposition to two 2d images=.
@@ -60,14 +59,10 @@ def coupled_decomposition(data, originx, originy, M=4, radial_size=720):
     # Project the image into a polar coordinate system centered on p_{1}
     thetas = reproject_image_into_polar(data, origin=(int(originx),
                                                        int(originy)))
-
     h, w = data.shape
-    # Compute the mean profiles for each radial slice
-    means = np.empty(radial_size)
 
     # Pass to C
-    cs.PyRadialMean(radial_size, h, w, data, thetas, means)
-    print(means)
+    means = cs.PyRadialMean(data, thetas)
 
 data = imread(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'AS15-M-0295_SML.png'))
 x, y = data.shape

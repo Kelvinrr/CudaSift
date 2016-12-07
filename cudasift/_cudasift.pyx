@@ -57,7 +57,7 @@ cdef extern from "cudaImage.h" nogil:
     cdef int iAlignDown(int a, int b)
 
 cdef extern from "cudaDecompose.h" nogil:
-    cdef void RadialMean(int steps, int h, int w, float *image, long *classified, float *means)
+    cdef void RadialMean(int steps, int h, int w, float *image, float *classified, float *means)
 
 cdef extern from "cudaSift.h" nogil:
     ctypedef struct SiftPoint:
@@ -104,15 +104,15 @@ def PyRadialMean(image, classified):
       np.ndarray tmpi = np.ascontiguousarray(image.astype(np.float32))
       void *pSrc = tmpi.data
 
-      np.ndarray tmpc = np.ascontiguousarray(classified)
+      np.ndarray tmpc = np.ascontiguousarray(classified.astype(np.float32))
       void *pClass = tmpc.data
 
       np.ndarray means = np.ascontiguousarray(np.empty(steps, dtype=np.float32))
       void *pMeans = means.data
 
     with nogil:
-      RadialMean(steps, h, w, <float *>pSrc, <long *>pClass, <float *>pMeans)
-    print('HERE')
+      RadialMean(steps, h, w, <float *>pSrc, <float *>pClass, <float *>pMeans)
+    return means
 
 def PyInitCuda(device_number=0):
     """
