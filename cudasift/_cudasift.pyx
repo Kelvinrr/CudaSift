@@ -56,6 +56,9 @@ cdef extern from "cudaImage.h" nogil:
     cdef int iAlignUp(int a, int b)
     cdef int iAlignDown(int a, int b)
 
+cdef extern from "cudaDecompose.h" nogil:
+    cdef void Decompose()
+
 cdef extern from "cudaSift.h" nogil:
     ctypedef struct SiftPoint:
         float xpos
@@ -92,6 +95,10 @@ cdef extern from "cudaSift.h" nogil:
         SiftData &data,  float *homography, int *numMatches,
         int numLoops, float minScore, float maxAmbiguity,
         float thresh)
+
+def PyDecompose():
+    Decompose()
+    print('HERE')
 
 def PyInitCuda(device_number=0):
     """

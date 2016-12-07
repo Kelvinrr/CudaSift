@@ -61,8 +61,11 @@ class BuildExt(build_ext):
             if extension.extra_link_args is None:
                 extension.extra_link_args = []
             extension.extra_link_args += [
+                # lib necessary on OS X
                 "-L%s" % os.path.join(self.cuda_prefix, "lib64"),
+		        "-L%s" % os.path.join(self.cuda_prefix, "lib"),
                 "-lcudart"]
+        print('CUDA PREFIX', self.cuda_prefix)
         build_ext.build_extensions(self)
 
     def _cuda_compile(self, obj, src, ext, cc_args, extra_postargs, pp_opts):
@@ -94,7 +97,8 @@ setuptools.setup(
                   language = "c++",
                   sources = [
                       os.path.join("cudasift", "_cudasift.pyx"),
-                      "src/cudaImage.cu", "src/cudaSiftH.cu", "src/matching.cu"])
+                      "src/cudaImage.cu", "src/cudaSiftH.cu",
+                      "src/matching.cu", "src/decompose.cu"])
         ],
     description="Bindings for CudaSift library",
     name="cudasift",
