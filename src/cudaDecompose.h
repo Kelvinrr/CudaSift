@@ -1,6 +1,6 @@
 #ifndef CUDA_DECOMPOSE
 #define CUDA_DECOMPOSE
 
-void Decompose();
+void RadialMean(int steps, int h, int w,  float *image, long *classified, float *means);
 
 #endif
