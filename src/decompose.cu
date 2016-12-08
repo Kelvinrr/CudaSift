@@ -14,8 +14,8 @@ void RadialMean(int steps, int h, int w,  float *image, float *classified, float
   }
   int i, j;
   float running_sum, theta, n;
-  //Compute the thetas vectos
-  for(int t=0;t<steps;t++){
+  //Compute the thetas vectors
+  for(int t=0;t<steps;t++){  // Here is where I can parallelize this
     theta = thetas[t];
     n = 0;
     running_sum = 0.0;
