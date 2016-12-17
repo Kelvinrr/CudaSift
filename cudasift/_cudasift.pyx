@@ -2,6 +2,8 @@ import ctypes
 import numpy as np
 import pandas
 
+from scipy.spatial.distance import cdist
+
 from libc.stdint cimport uintptr_t
 from libc.string cimport memcpy
 from libc.stdio cimport printf
@@ -58,6 +60,10 @@ cdef extern from "cudaImage.h" nogil:
 
 cdef extern from "cudaDecompose.h" nogil:
     cdef void RadialMean(int steps, int h, int w, float *image, float *classified, float *means)
+    cdef void DecomposeAndMatch(CudaImage &img1, CudaImage &img2,
+                                CudaImage &mem1, CudaImage &mem2,
+                                int soriginx, int soriginy, int doriginx, int doriginy,
+                                int source_extent[4], int destination_extent[4])
 
 cdef extern from "cudaSift.h" nogil:
     ctypedef struct SiftPoint:
@@ -113,6 +119,156 @@ def PyRadialMean(image, classified):
     with nogil:
       RadialMean(steps, h, w, <float *>pSrc, <float *>pClass, <float *>pMeans)
     return means
+
+def PyDecomposeAndMatch(img1, img2, maxiterations=3, ratio=0.9, buf_dist=3):
+    cdef:
+        # Get the image data allocated
+        CudaImage cimg1
+        CudaImage cimg2
+        np.ndarray tmp1 = np.ascontiguousarray(img1.astype(np.float32))
+        void *pImg1 = tmp1.data
+        size_t w1 = img1.shape[1]
+        size_t h1 = img1.shape[0]
+        np.ndarray tmp2 = np.ascontiguousarray(img2.astype(np.float32))
+        void *pImg2 = tmp2.data
+        size_t w2 = img2.shape[1]
+        size_t h2 = img2.shape[0]
+
+        #
+        int source_extent[4]
+        int destination_extent[4]
+
+        # Get the membership data allocated
+        CudaImage cmem1
+        CudaImage cmem2
+        np.ndarray mem1 = np.zeros(img1.shape, dtype=np.float32)
+        np.ndarray mem2 = np.zeros(img2.shape, dtype=np.float32)
+        #np.ndarray tcmem1 = np.ascontiguousarray(mem1.astype(np.float32))
+        void *pMem1 = mem1.data
+        #np.ndarray tcmem2 = np.ascontiguousarray(mem2.astype(np.float32))
+        void *pMem2 = mem2.data
+
+        # Get the SIFT data setup
+        # Parameters for the SIFT extraction
+        int numOctaves = 5,
+        float initBlur = 0,
+        float thresh = 5,
+        float lowestScale = 0,
+        float subsampling = 1.0
+
+    # Download the two images to the GPU
+    with nogil:
+        # Allocate and download the images
+        cimg1.Allocate(w1, h1, iAlignUp(w1, 128), False, NULL, <float *>pImg1)
+        cimg2.Allocate(w2, h2, iAlignUp(w2, 128), False, NULL, <float *>pImg2)
+        cimg1.Download()
+        cimg2.Download()
+
+        # Allocate and download the memberships
+        cmem1.Allocate(w1, h1, iAlignUp(w1, 128), False, NULL, <float *>pMem1)
+        cmem2.Allocate(w1, h1, iAlignUp(w2, 128), False, NULL, <float *>pMem2)
+        cmem1.Download()
+        cmem2.Download()
+
+    # Instantiate the PySiftDAta
+    sd1 = PySiftData()
+    sd2 = PySiftData()
+
+    del tmp1
+    del tmp2
+
+    # Now extract the keypoints
+    with nogil:
+        ExtractSift(sd1.data, cimg1, numOctaves, initBlur, thresh,
+                        lowestScale, subsampling)
+        ExtractSift(sd2.data, cimg2, numOctaves, initBlur, thresh,
+                        lowestScale, subsampling)
+
+    # Grab the keypoints that have been extracted
+    source_keypoints, source_descriptors = sd1.to_data_frame()
+    destination_keypoints, destination_descriptors = sd2.to_data_frame()
+
+    for i in range(maxiterations):
+        # Read the membership information back from the GPU
+        # This should update the CudaImage.h_data attribute
+        cmem1.Readback()
+        cmem2.Readback()
+        # Step over the unique membership values
+        for p in np.unique(mem1):
+            print('Processing Decomposition: ', p)
+            sy_part, sx_part = np.where(mem1 == p)
+            dy_part, dx_part = np.where(mem2 == p)
+
+            # Get the source extent
+            minsy = np.min(sy_part)
+            maxsy = np.max(sy_part) + 1
+            minsx = np.min(sx_part)
+            maxsx = np.max(sx_part) + 1
+            source_extent[:] = minsy, maxsy, minsx, maxsx
+            # Get the destination extent
+            mindy = np.min(dy_part)
+            maxdy = np.max(dy_part) + 1
+            mindx = np.min(dx_part)
+            maxdx = np.max(dx_part) + 1
+            destination_extent[:] = mindy, maxdy, mindx, maxdx
+
+            scounter = 0
+            decompose = False
+            while True:
+                # Get the source and destination keypoints that are in the current subregion
+                sub_source_keypoints = source_keypoints.query('xpos >= {} and xpos <= {} and ypos >= {} and ypos <= {}'.format(minsx, maxsx, minsy, maxsy))
+                if len(sub_source_keypoints) == 0:
+                    break  # No valid keypoints in this (sub)image
+
+                sub_destination_keypoints = destination_keypoints.query('xpos >= {} and xpos <= {} and ypos >= {} and ypos <= {}'.format(mindx, maxdx, mindy, maxdy))
+                if len(sub_destination_keypoints) == 0:
+                    break  # No valid keypoints in this (sub)image
+
+                sub_skps = sub_source_keypoints[['xpos', 'ypos', 'scale', 'sharpness', 'edgeness', 'orientation', 'score', 'ambiguity']]
+                sub_dkps = sub_destination_keypoints[['xpos', 'ypos', 'scale', 'sharpness', 'edgeness', 'orientation', 'score', 'ambiguity']]
+                # Create temporary SiftData objects and match them
+
+                tsd1 = PySiftData.from_data_frame(sub_skps, source_descriptors[sub_source_keypoints.index])
+                tsd2 = PySiftData.from_data_frame(sub_dkps, destination_descriptors[sub_destination_keypoints.index])
+
+                PyMatchSiftData(tsd1, tsd2)
+                localmatches, _ = tsd1.to_data_frame()
+                #Subset to get the good points
+                goodpts = localmatches[localmatches['ambiguity'] <= ratio]
+                # Get the mean of the good points and then get the point closest to the mean
+                meanx, meany = goodpts[['xpos', 'ypos']].mean()
+                mid = np.array([[meanx, meany]])
+                dists = cdist(mid, goodpts[['xpos', 'ypos']])
+                closest = goodpts.iloc[np.argmin(dists)]
+                soriginx, soriginy = closest[['xpos', 'ypos']]
+                doriginx, doriginy = closest[['match_xpos', 'match_ypos']]
+
+                # Check that we are not within 3 pixels of the edge
+                if mindy + buf_dist <= doriginy <= maxdy - buf_dist\
+                 and mindx + buf_dist <= doriginx <= maxdx - buf_dist:
+                    # Point is good to split on
+                    decompose = True
+                    break
+                else:
+                    scounter += 1
+                    if scounter >= maxiterations:
+                        break
+            # We have no guarantee that the match is good, so now check that
+            # the match is within the subimage
+            if decompose:
+                DecomposeAndMatch(cimg1, cimg2,
+                                  cmem1, cmem2,
+                                  soriginx, soriginy,
+                                  doriginx, doriginy,
+                                  source_extent, destination_extent)
+                # Remove these readbacks if not returning!
+                cmem1.Readback()
+                cmem2.Readback()
+                return mem1, mem2
+            break
+
+    #with nogil:
+        #DecomposeAndMatch(cimg1, cimg2)
 
 def PyInitCuda(device_number=0):
     """
@@ -327,6 +483,25 @@ def ExtractKeypoints(np.ndarray srcImage,
     with nogil:
         ExtractSift(pySiftData.data, destImage, numOctaves, initBlur, thresh,
                     lowestScale, subsampling)
+
+cdef class PyCudaImage(object):
+    """
+    Wrapper around CudaSift's CudaImage object
+    """
+
+    def __init__(self, np.ndarray img):
+        cdef:
+            CudaImage destImage
+            size_t size_x = img.shape[1]
+            size_t size_y = img.shape[0]
+            np.ndarray tmp = np.ascontiguousarray(img.astype(np.float32))
+            void *pSrc = tmp.data
+        with nogil:
+            destImage.Allocate(size_x, size_y, iAlignUp(size_x, 128),
+                               False, NULL, <float *>pSrc)
+            destImage.Download()
+        print('Downloaded')
+        del tmp
 
 def PyMatchSiftData(PySiftData data1, PySiftData data2):
     """

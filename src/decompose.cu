@@ -3,8 +3,6 @@
 #include "cudautils.h"
 #include "cudaImage.h"
 
-// The decomposition can be written in C with the radial reproj. and
-//  classification occurring in Cuda
 void RadialMean(int steps, int h, int w,  float *image, float *classified, float *means)
 {
   float stepsize = 2 * M_PI / steps;
@@ -90,22 +88,67 @@ __global__ void SourceRadialClassify(float *mem, float start, int originx, int o
   if (y < height && x < width)
   {
     float theta = atan2f(y - originy, x - originx);
-    float min = 0.0;
+    float min = -1.0 * M_PI;
     float step = M_PI / 2.0;
-    for(int i=0;i<=4;i++)
-    {
+    for(int i=0;i<=4;i++){
       if(min <= theta && theta <= min + step){
-        mem[offset] = start + i;
-      } else {
-        mem[offset] = 5.0;
+        mem[offset] = i;
       }
       min += step;
     }
   }
 }
 
-__global__ void correlate(float *x, float *y, float *thetas)
+__global__ void DestinRadialClassify(float *mem, float start, float rotation, int originx, int originy, int width, int height)
 {
+  int x = threadIdx.x + blockIdx.x * blockDim.x;
+  int y = threadIdx.y + blockIdx.y * blockDim.y;
+  int offset = x + y * blockDim.x * gridDim.x;
+
+  // Classify the pixel to some theta
+  if (y < height && x < width)
+  {
+    float theta = atan2f(y - originy, x - originx);
+    float lam = 0.0;
+
+    //This is failing and returning 4 for everything...
+
+    float min = -1.0 * M_PI;
+    float step = M_PI / 2.0;
+    float start_theta = min + rotation;
+    float stop_theta = 0;
+    float twopi = 2 * M_PI;
+    
+    for(int i=0;i<=4;i++){
+      stop_theta = start_theta + step;
+
+      if(stop_theta > twopi){
+        stop_theta -= twopi;
+      }
+      if(start_theta > twopi){
+        start_theta -= twopi;
+      }
+
+      if(start_theta > stop_theta){
+        if (start_theta <= theta && theta <= twopi){
+          mem[offset] = i;
+        }
+        else if(0 <= theta && theta <= stop_theta + lam){
+          mem[offset] = i;
+        }
+        else if(start_theta <= theta && theta <= stop_theta){
+          mem[offset] = i;
+        }
+      } else if(start_theta <= theta && theta <= stop_theta) {
+        mem[offset] = i;
+      }
+      start_theta += step;
+    }
+  }
+}
+
+__global__ void correlate(float *x, float *y, float *thetas)
+  {
   int tid = threadIdx.x;
   int n = 720;
   int new_idx;
@@ -234,7 +277,7 @@ void DecomposeAndMatch(CudaImage &img1, CudaImage &img2, CudaImage &mem1, CudaIm
   //Source image never rotates, so always square
   SourceRadialClassify<<<numBlocks1, threadsPerBlock>>>(mem1.d_data, start, soriginx, soriginy, w1, h1);
   //Destination image needs to be able to rotate
-
+  DestinRadialClassify<<<numBlocks2, threadsPerBlock>>>(mem2.d_data, start, rotation, doriginx, doriginy, w2, h2);
 
   // Clean Up
   cudaFree(dev_thetas);
