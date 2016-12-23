@@ -63,7 +63,8 @@ cdef extern from "cudaDecompose.h" nogil:
     cdef void DecomposeAndMatch(CudaImage &img1, CudaImage &img2,
                                 CudaImage &mem1, CudaImage &mem2,
                                 int soriginx, int soriginy, int doriginx, int doriginy,
-                                int source_extent[4], int destination_extent[4])
+                                int start,
+                                int *source_extent, int *destination_extent)
 
 cdef extern from "cudaSift.h" nogil:
     ctypedef struct SiftPoint:
@@ -134,7 +135,6 @@ def PyDecomposeAndMatch(img1, img2, maxiterations=3, ratio=0.9, buf_dist=3):
         size_t w2 = img2.shape[1]
         size_t h2 = img2.shape[0]
 
-        #
         int source_extent[4]
         int destination_extent[4]
 
@@ -188,6 +188,7 @@ def PyDecomposeAndMatch(img1, img2, maxiterations=3, ratio=0.9, buf_dist=3):
     source_keypoints, source_descriptors = sd1.to_data_frame()
     destination_keypoints, destination_descriptors = sd2.to_data_frame()
 
+    start = 1
     for i in range(maxiterations):
         # Read the membership information back from the GPU
         # This should update the CudaImage.h_data attribute
@@ -260,13 +261,15 @@ def PyDecomposeAndMatch(img1, img2, maxiterations=3, ratio=0.9, buf_dist=3):
                                   cmem1, cmem2,
                                   soriginx, soriginy,
                                   doriginx, doriginy,
+                                  start,
                                   source_extent, destination_extent)
                 # Remove these readbacks if not returning!
-                cmem1.Readback()
-                cmem2.Readback()
-                return mem1, mem2
-            break
-
+                #cmem1.Readback()
+                #cmem2.Readback()
+                start += 4
+    cmem1.Readback()
+    cmem2.Readback()
+    return mem1, mem2
     #with nogil:
         #DecomposeAndMatch(cimg1, cimg2)
 

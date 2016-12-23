@@ -35,7 +35,7 @@ void RadialMean(int steps, int h, int w,  float *image, float *classified, float
   }
 }
 
-__global__ void RadialMean(float *classif, int originx, int originy, int width, int height, float *thetas)
+__global__ void RadialMean(float *classif, int originx, int originy, int width, int height, float *thetas, int *extents)
 {
 
   __shared__ float means[720];
@@ -48,23 +48,25 @@ __global__ void RadialMean(float *classif, int originx, int originy, int width, 
   // Classify the pixel to some theta and collect the dn sums at each radial slice
   if (y < height && x < width)
   {
-    float theta = atan2f(y - originy, x - originx);
+    if(y >= extents[0] && y <= extents[1] && x >= extents[2] && x <= extents[3])
+    {
+      float theta = atan2f(y - originy, x - originx);
 
-    // To debug and visualize, set the pixel to theta and return
-    //classif[offset] = theta;
+      // To debug and visualize, set the pixel to theta and return
+      //classif[offset] = theta;
 
-    //Find the index in the means vector that the dn value should be added to.
-    float dn_value = classif[offset];
-    size_t index = 0;
-    while (index < 720 && thetas[index] != theta){
-      index++;
+      //Find the index in the means vector that the dn value should be added to.
+      float dn_value = classif[offset];
+      size_t index = 0;
+      while (index < 720 && thetas[index] != theta){
+        index++;
+      }
+      // Add the value to the means and increment the counts
+      atomicAdd(&means[index], dn_value);
+      atomicAdd(&mean_counts[index], 1);
     }
-    // Add the value to the means and increment the counts
-    atomicAdd(&means[index], dn_value);
-    atomicAdd(&mean_counts[index], 1);
-    __syncthreads();  // wait for everyone to finish
   }
-
+  __syncthreads();  // wait for everyone to finish
   // Now compute the means
   if (blockIdx.x == 0 && threadIdx.x < 720)
   {
@@ -78,7 +80,7 @@ __global__ void RadialMean(float *classif, int originx, int originy, int width, 
   // Map from thread/block to pixel position
 //}
 
-__global__ void SourceRadialClassify(float *mem, float start, int originx, int originy, int width, int height)
+__global__ void SourceRadialClassify(float *mem, float start, int originx, int originy, int width, int height, int *extents)
 {
   int x = threadIdx.x + blockIdx.x * blockDim.x;
   int y = threadIdx.y + blockIdx.y * blockDim.y;
@@ -87,19 +89,22 @@ __global__ void SourceRadialClassify(float *mem, float start, int originx, int o
   // Classify the pixel to some theta
   if (y < height && x < width)
   {
-    float theta = atan2f(y - originy, x - originx);
-    float min = -1.0 * M_PI;
-    float step = M_PI / 2.0;
-    for(int i=0;i<=4;i++){
-      if(min <= theta && theta <= min + step){
-        mem[offset] = i;
+    if(y >= extents[0] && y <= extents[1] && x >= extents[2] && x <= extents[3])
+    {
+      float theta = atan2f(y - originy, x - originx);
+      float min = -1.0 * M_PI;
+      float step = M_PI / 2.0;
+      for(int i=0;i<4;i++){
+        if(min <= theta && theta <= min + step){
+          mem[offset] = i + start;
+        }
+        min += step;
       }
-      min += step;
     }
   }
 }
 
-__global__ void DestinRadialClassify(float *mem, float start, float rotation, int originx, int originy, int width, int height)
+__global__ void DestinRadialClassify(float *mem, float start, float rotation, int originx, int originy, int width, int height, int *extents)
 {
   int x = threadIdx.x + blockIdx.x * blockDim.x;
   int y = threadIdx.y + blockIdx.y * blockDim.y;
@@ -108,41 +113,44 @@ __global__ void DestinRadialClassify(float *mem, float start, float rotation, in
   // Classify the pixel to some theta
   if (y < height && x < width)
   {
-    float theta = atan2f(y - originy, x - originx);
-    float lam = 0.0;
+    if(y >= extents[0] && y <= extents[1] && x >= extents[2] && x <= extents[3])
+    {
+      float theta = atan2f(y - originy, x - originx);
+      float lam = 0.0;
 
-    //This is failing and returning 4 for everything...
+      //This is failing and returning 4 for everything...
 
-    float min = -1.0 * M_PI;
-    float step = M_PI / 2.0;
-    float start_theta = min + rotation;
-    float stop_theta = 0;
-    float twopi = 2 * M_PI;
-    
-    for(int i=0;i<=4;i++){
-      stop_theta = start_theta + step;
+      float min = -1.0 * M_PI;
+      float step = M_PI / 2.0;
+      float start_theta = min + rotation;
+      float stop_theta = 0;
+      float twopi = 2 * M_PI;
 
-      if(stop_theta > twopi){
-        stop_theta -= twopi;
-      }
-      if(start_theta > twopi){
-        start_theta -= twopi;
-      }
+      for(int i=0;i<4;i++){
+        stop_theta = start_theta + step;
 
-      if(start_theta > stop_theta){
-        if (start_theta <= theta && theta <= twopi){
-          mem[offset] = i;
+        if(stop_theta > twopi){
+          stop_theta -= twopi;
         }
-        else if(0 <= theta && theta <= stop_theta + lam){
-          mem[offset] = i;
+        if(start_theta > twopi){
+          start_theta -= twopi;
         }
-        else if(start_theta <= theta && theta <= stop_theta){
-          mem[offset] = i;
+
+        if(start_theta > stop_theta){
+          if (start_theta <= theta && theta <= twopi){
+            mem[offset] = i + start;
+          }
+          else if(0 <= theta && theta <= stop_theta + lam){
+            mem[offset] = i + start;
+          }
+          else if(start_theta <= theta && theta <= stop_theta){
+            mem[offset] = i + start;
+          }
+        } else if(start_theta <= theta && theta <= stop_theta) {
+          mem[offset] = i + start;
         }
-      } else if(start_theta <= theta && theta <= stop_theta) {
-        mem[offset] = i;
+        start_theta += step;
       }
-      start_theta += step;
     }
   }
 }
@@ -196,17 +204,27 @@ __global__ void correlate(float *x, float *y, float *thetas)
   __syncthreads();
 }
 
-void DecomposeAndMatch(CudaImage &img1, CudaImage &img2, CudaImage &mem1, CudaImage &mem2, int soriginx, int soriginy, int doriginx, int doriginy, int source_extent[4], int destination_extent[4])
+void DecomposeAndMatch(CudaImage &img1, CudaImage &img2, CudaImage &mem1, CudaImage &mem2, int soriginx, int soriginy, int doriginx, int doriginy, int start, int *source_extent, int *destination_extent)
 {
   int w1 = img1.width;
   int h1 = img1.height;
   int w2 = img2.width;
   int h2 = img2.height;
 
-  int start = 1;  // This needs to be passed in.  This is the new partition starting number
   int steps = 720;
   float source_means[720];
   float destin_means[720];
+
+  for(int i=0;i<4;i++){
+    printf("%i / %i\n", source_extent[i], destination_extent[i]);
+  }
+
+  int *dev_source_extent;
+  int *dev_destin_extent;
+  cudaMalloc((void**)&dev_source_extent, 4 * sizeof(int));
+  cudaMalloc((void**)&dev_destin_extent, 4 * sizeof(int));
+  cudaMemcpy(dev_source_extent, source_extent, 4 * sizeof(int), cudaMemcpyHostToDevice);
+  cudaMemcpy(dev_destin_extent, destination_extent, 4 * sizeof(int), cudaMemcpyHostToDevice);
 
   // Set up a thetas vector for classifying
   float stepsize = 2 * M_PI / steps;
@@ -229,9 +247,9 @@ void DecomposeAndMatch(CudaImage &img1, CudaImage &img2, CudaImage &mem1, CudaIm
 
   dim3 numBlocks2((w2 + (threadsPerBlock.x - 1))/threadsPerBlock.x,
                   (h2 + (threadsPerBlock.y - 1))/threadsPerBlock.y);
-  RadialMean<<<numBlocks1, threadsPerBlock>>>(img1.d_data, soriginx, soriginy, w1, h1, dev_thetas);
+  RadialMean<<<numBlocks1, threadsPerBlock>>>(img1.d_data, soriginx, soriginy, w1, h1, dev_thetas, dev_source_extent);
   cudaMemcpy(source_means, dev_thetas, steps * sizeof(float), cudaMemcpyDeviceToHost);
-  RadialMean<<<numBlocks2, threadsPerBlock>>>(img2.d_data, doriginx, doriginy, w2, h2, dev_thetas);
+  RadialMean<<<numBlocks2, threadsPerBlock>>>(img2.d_data, doriginx, doriginy, w2, h2, dev_thetas, dev_destin_extent);
   cudaMemcpy(destin_means, dev_thetas, steps * sizeof(float), cudaMemcpyDeviceToHost);
 
   // I should now have the means from both the source and the destination images for a given subimages
@@ -275,9 +293,9 @@ void DecomposeAndMatch(CudaImage &img1, CudaImage &img2, CudaImage &mem1, CudaIm
   }
   //Compute the breaks using the max theta and classify the images
   //Source image never rotates, so always square
-  SourceRadialClassify<<<numBlocks1, threadsPerBlock>>>(mem1.d_data, start, soriginx, soriginy, w1, h1);
+  SourceRadialClassify<<<numBlocks1, threadsPerBlock>>>(mem1.d_data, start, soriginx, soriginy, w1, h1, dev_source_extent);
   //Destination image needs to be able to rotate
-  DestinRadialClassify<<<numBlocks2, threadsPerBlock>>>(mem2.d_data, start, rotation, doriginx, doriginy, w2, h2);
+  DestinRadialClassify<<<numBlocks2, threadsPerBlock>>>(mem2.d_data, start, rotation, doriginx, doriginy, w2, h2, dev_destin_extent);
 
   // Clean Up
   cudaFree(dev_thetas);
