@@ -1,6 +1,6 @@
 import ctypes
 import numpy as np
-import pandas
+import pandas as pd
 
 from scipy.spatial.distance import cdist
 
@@ -59,10 +59,9 @@ cdef extern from "cudaImage.h" nogil:
     cdef int iAlignDown(int a, int b)
 
 cdef extern from "cudaDecompose.h" nogil:
-    cdef void RadialMean(int steps, int h, int w, float *image, float *classified, float *means)
     cdef void DecomposeAndMatch(CudaImage &img1, CudaImage &img2,
                                 CudaImage &mem1, CudaImage &mem2,
-                                int soriginx, int soriginy, int doriginx, int doriginy,
+                                float soriginx, float soriginy, float doriginx, float doriginy,
                                 int start,
                                 int *source_extent, int *destination_extent)
 
@@ -93,7 +92,7 @@ cdef extern from "cudaSift.h" nogil:
     cdef void ExtractSift(
         SiftData &siftData, CudaImage &img, int numOctaves,
         double initBlur, float thresh, float lowestScale,
-        float subsampling)
+        bool scaleUp)
     cdef void InitSiftData(SiftData &data, int num, bool host, bool dev)
     cdef void FreeSiftData(SiftData &data)
     cdef void PrintSiftData(SiftData &data)
@@ -103,86 +102,64 @@ cdef extern from "cudaSift.h" nogil:
         int numLoops, float minScore, float maxAmbiguity,
         float thresh)
 
-def PyRadialMean(image, classified):
-    cdef:
-      size_t w = classified.shape[1]
-      size_t h = classified.shape[0]
-      int steps = 720
-      np.ndarray tmpi = np.ascontiguousarray(image.astype(np.float32))
-      void *pSrc = tmpi.data
-
-      np.ndarray tmpc = np.ascontiguousarray(classified.astype(np.float32))
-      void *pClass = tmpc.data
-
-      np.ndarray means = np.ascontiguousarray(np.empty(steps, dtype=np.float32))
-      void *pMeans = means.data
-
-    with nogil:
-      RadialMean(steps, h, w, <float *>pSrc, <float *>pClass, <float *>pMeans)
-    return means
-
-def PyDecomposeAndMatch(img1, img2, maxiterations=3, ratio=0.9, buf_dist=3):
+def PyDecomposeAndMatch(img1, img2, maxiterations=3, ratio=0.9, buf_dist=3,
+                        float thresh=5, int numOctaves=5):
     cdef:
         # Get the image data allocated
         CudaImage cimg1
-        CudaImage cimg2
         np.ndarray tmp1 = np.ascontiguousarray(img1.astype(np.float32))
         void *pImg1 = tmp1.data
         size_t w1 = img1.shape[1]
         size_t h1 = img1.shape[0]
+        CudaImage cimg2
         np.ndarray tmp2 = np.ascontiguousarray(img2.astype(np.float32))
         void *pImg2 = tmp2.data
         size_t w2 = img2.shape[1]
         size_t h2 = img2.shape[0]
 
         int source_extent[4]
-        int destination_extent[4]
+        int destin_extent[4]
 
         # Get the membership data allocated
         CudaImage cmem1
         CudaImage cmem2
-        np.ndarray mem1 = np.zeros(img1.shape, dtype=np.float32)
-        np.ndarray mem2 = np.zeros(img2.shape, dtype=np.float32)
-        #np.ndarray tcmem1 = np.ascontiguousarray(mem1.astype(np.float32))
+        np.ndarray mem1 = np.ascontiguousarray(np.zeros(img1.shape))
+        np.ndarray mem2 = np.ascontiguousarray(np.zeros(img2.shape))
         void *pMem1 = mem1.data
-        #np.ndarray tcmem2 = np.ascontiguousarray(mem2.astype(np.float32))
         void *pMem2 = mem2.data
 
         # Get the SIFT data setup
         # Parameters for the SIFT extraction
-        int numOctaves = 5,
         float initBlur = 0,
-        float thresh = 5,
         float lowestScale = 0,
-        float subsampling = 1.0
+        bool scaleUp = False
 
     # Download the two images to the GPU
     with nogil:
         # Allocate and download the images
         cimg1.Allocate(w1, h1, iAlignUp(w1, 128), False, NULL, <float *>pImg1)
-        cimg2.Allocate(w2, h2, iAlignUp(w2, 128), False, NULL, <float *>pImg2)
         cimg1.Download()
+        cimg2.Allocate(w2, h2, iAlignUp(w2, 128), False, NULL, <float *>pImg2)
         cimg2.Download()
 
         # Allocate and download the memberships
         cmem1.Allocate(w1, h1, iAlignUp(w1, 128), False, NULL, <float *>pMem1)
-        cmem2.Allocate(w1, h1, iAlignUp(w2, 128), False, NULL, <float *>pMem2)
         cmem1.Download()
+        cmem2.Allocate(w2, h2, iAlignUp(w2, 128), False, NULL, <float *>pMem2)
         cmem2.Download()
 
     # Instantiate the PySiftDAta
     sd1 = PySiftData()
     sd2 = PySiftData()
-
     del tmp1
     del tmp2
 
     # Now extract the keypoints
     with nogil:
         ExtractSift(sd1.data, cimg1, numOctaves, initBlur, thresh,
-                        lowestScale, subsampling)
+                        lowestScale, scaleUp)
         ExtractSift(sd2.data, cimg2, numOctaves, initBlur, thresh,
-                        lowestScale, subsampling)
+                        lowestScale, scaleUp)
 
     # Grab the keypoints that have been extracted
     source_keypoints, source_descriptors = sd1.to_data_frame()
@@ -196,7 +173,6 @@ def PyDecomposeAndMatch(img1, img2, maxiterations=3, ratio=0.9, buf_dist=3):
         cmem2.Readback()
         # Step over the unique membership values
         for p in np.unique(mem1):
-            print('Processing Decomposition: ', p)
             sy_part, sx_part = np.where(mem1 == p)
             dy_part, dx_part = np.where(mem2 == p)
 
@@ -211,24 +187,23 @@ def PyDecomposeAndMatch(img1, img2, maxiterations=3, ratio=0.9, buf_dist=3):
             maxdy = np.max(dy_part) + 1
             mindx = np.min(dx_part)
             maxdx = np.max(dx_part) + 1
-            destination_extent[:] = mindy, maxdy, mindx, maxdx
+            destin_extent[:] = mindy, maxdy, mindx, maxdx
 
             scounter = 0
             decompose = False
             while True:
                 # Get the source and destination keypoints that are in the current subregion
-                sub_source_keypoints = source_keypoints.query('xpos >= {} and xpos <= {} and ypos >= {} and ypos <= {}'.format(minsx, maxsx, minsy, maxsy))
+                sub_source_keypoints = source_keypoints.query('x >= {} and x <= {} and y >= {} and y <= {}'.format(minsx, maxsx, minsy, maxsy))
                 if len(sub_source_keypoints) == 0:
                     break  # No valid keypoints in this (sub)image
 
-                sub_destination_keypoints = destination_keypoints.query('xpos >= {} and xpos <= {} and ypos >= {} and ypos <= {}'.format(mindx, maxdx, mindy, maxdy))
+                sub_destination_keypoints = destination_keypoints.query('x >= {} and x <= {} and y >= {} and y <= {}'.format(mindx, maxdx, mindy, maxdy))
                 if len(sub_destination_keypoints) == 0:
                     break  # No valid keypoints in this (sub)image
 
-                sub_skps = sub_source_keypoints[['xpos', 'ypos', 'scale', 'sharpness', 'edgeness', 'orientation', 'score', 'ambiguity']]
-                sub_dkps = sub_destination_keypoints[['xpos', 'ypos', 'scale', 'sharpness', 'edgeness', 'orientation', 'score', 'ambiguity']]
+                sub_skps = sub_source_keypoints[['x', 'y', 'scale', 'sharpness', 'edgeness', 'orientation', 'score', 'ambiguity']]
+                sub_dkps = sub_destination_keypoints[['x', 'y', 'scale', 'sharpness', 'edgeness', 'orientation', 'score', 'ambiguity']]
                 # Create temporary SiftData objects and match them
-
                 tsd1 = PySiftData.from_data_frame(sub_skps, source_descriptors[sub_source_keypoints.index])
                 tsd2 = PySiftData.from_data_frame(sub_dkps, destination_descriptors[sub_destination_keypoints.index])
 
@@ -236,13 +211,20 @@ def PyDecomposeAndMatch(img1, img2, maxiterations=3, ratio=0.9, buf_dist=3):
                 localmatches, _ = tsd1.to_data_frame()
                 #Subset to get the good points
                 goodpts = localmatches[localmatches['ambiguity'] <= ratio]
+                if len(goodpts) == 0:
+                    break # No valid good point
+                elif (goodpts['ambiguity'] < 0).all():
+                    break # No good matches identified
                 # Get the mean of the good points and then get the point closest to the mean
-                meanx, meany = goodpts[['xpos', 'ypos']].mean()
+                bestidx = goodpts['score'].argmax()
+                match = goodpts.loc[bestidx]
+                soriginx, soriginy, doriginx, doriginy = match[['x', 'y', 'match_xpos', 'match_ypos']].values
+                """meanx, meany = goodpts[['x', 'y']].mean()
                 mid = np.array([[meanx, meany]])
-                dists = cdist(mid, goodpts[['xpos', 'ypos']])
+                dists = cdist(mid, goodpts[['x', 'y']])
                 closest = goodpts.iloc[np.argmin(dists)]
-                soriginx, soriginy = closest[['xpos', 'ypos']]
-                doriginx, doriginy = closest[['match_xpos', 'match_ypos']]
+                soriginx, soriginy = closest[['x', 'y']]
+                doriginx, doriginy = closest[['match_xpos', 'match_ypos']]"""
 
                 # Check that we are not within 3 pixels of the edge
                 if mindy + buf_dist <= doriginy <= maxdy - buf_dist\
@@ -262,14 +244,67 @@ def PyDecomposeAndMatch(img1, img2, maxiterations=3, ratio=0.9, buf_dist=3):
                                   soriginx, soriginy,
                                   doriginx, doriginy,
                                   start,
-                                  source_extent, destination_extent)
+                                  source_extent, destin_extent)
                 # Remove these readbacks if not returning!
                 #cmem1.Readback()
                 #cmem2.Readback()
+                print(np.unique(mem1), np.unique(mem2))
                 start += 4
     cmem1.Readback()
     cmem2.Readback()
     return mem1, mem2
+
+    local_match_dataframes = []
+    # Now that decomposition has occurred - match each sub-image
+    for p in np.unique(mem1):
+        sy_part, sx_part = np.where(mem1 == p)
+        dy_part, dx_part = np.where(mem2 == p)
+
+        # Get the source extent
+        minsy = np.min(sy_part)
+        maxsy = np.max(sy_part) + 1
+        minsx = np.min(sx_part)
+        maxsx = np.max(sx_part) + 1
+        # Get the destination extent
+        mindy = np.min(dy_part)
+        maxdy = np.max(dy_part) + 1
+        mindx = np.min(dx_part)
+        maxdx = np.max(dx_part) + 1
+
+        # Get the source and destination keypoints that are in the current subregion
+        sub_source_keypoints = source_keypoints.query('x >= {} and x <= {} and y >= {} and y <= {}'.format(minsx, maxsx, minsy, maxsy))
+        if len(sub_source_keypoints) == 0:
+            break  # No valid keypoints in this (sub)image
+
+        sub_destination_keypoints = destination_keypoints.query('x >= {} and x <= {} and y >= {} and y <= {}'.format(mindx, maxdx, mindy, maxdy))
+        if len(sub_destination_keypoints) == 0:
+            break  # No valid keypoints in this (sub)image
+
+        sub_skps = sub_source_keypoints[['x', 'y', 'scale', 'sharpness', 'edgeness', 'orientation', 'score', 'ambiguity']]
+        sub_dkps = sub_destination_keypoints[['x', 'y', 'scale', 'sharpness', 'edgeness', 'orientation', 'score', 'ambiguity']]
+        # Create temporary SiftData objects and match them
+        original_index = sub_skps.index
+        # I need to think about what this is doing to indexing - the mapping is probably getting lost!
+        tsd1 = PySiftData.from_data_frame(sub_skps, source_descriptors[sub_source_keypoints.index])
+        tsd2 = PySiftData.from_data_frame(sub_dkps, destination_descriptors[sub_destination_keypoints.index])
+
+        PyMatchSiftData(tsd1, tsd2)
+        localmatches, _ = tsd1.to_data_frame()
+
+        # Indexing is local to this sub-image, but global indexing is required - remap
+        smap = dict(zip(range(len(sub_skps)), sub_skps.index))
+        dmap = dict(zip(range(len(sub_dkps)), sub_dkps.index))
+        localmatches['match'].replace(dmap, inplace=True)
+        localmatches.index = sub_skps.index
+
+        local_match_dataframes.append(localmatches)
+
+    matches = pd.concat(local_match_dataframes)
+
+    return mem1, mem2, matches,\
+           source_keypoints, source_descriptors,\
+           destination_keypoints, destination_descriptors
+
     #with nogil:
         #DecomposeAndMatch(cimg1, cimg2)
 
@@ -328,8 +363,8 @@ cdef class PySiftData:
         nKeypoints = data.numPts;
         if nKeypoints == 0:
             empty = np.zeros(0, np.float32)
-            return pandas.DataFrame(dict(
-                xpos=empty, ypos=empty, scale=empty,
+            return pd.DataFrame(dict(
+                x=empty, y=empty, scale=empty,
                 sharpness=empty, edgeness=empty, orientation=empty,
                 score=empty, ambiguity=empty, match=np.zeros(0, int),
                 match_xpos=empty, match_ypos=empty, match_error=empty,
@@ -363,20 +398,20 @@ cdef class PySiftData:
         match_ypos_off = <size_t>(&pts.match_ypos - <float *>pts)
         match_error_off = <size_t>(&pts.match_error - <float *>pts)
         subsampling_off = <size_t>(&pts.subsampling - <float *>pts)
-        return pandas.concat((
-            pandas.Series(h_data[:, xpos_off], name="xpos"),
-            pandas.Series(h_data[:, ypos_off], name="ypos"),
-            pandas.Series(h_data[:, scale_off], name="scale"),
-            pandas.Series(h_data[:, sharpness_off], name="sharpness"),
-            pandas.Series(h_data[:, edgeness_off], name="edgeness"),
-            pandas.Series(h_data[:, orientation_off], name="orientation"),
-            pandas.Series(h_data[:, score_off], name="score"),
-            pandas.Series(h_data[:, ambiguity_off], name="ambiguity"),
-            pandas.Series(match_data, name = "match"),
-            pandas.Series(h_data[:, match_xpos_off], name="match_xpos"),
-            pandas.Series(h_data[:, match_ypos_off], name="match_ypos"),
-            pandas.Series(h_data[:, match_error_off], name="match_error"),
-            pandas.Series(h_data[:, subsampling_off], name="subsampling")
+        return pd.concat((
+            pd.Series(h_data[:, xpos_off], name="x"),
+            pd.Series(h_data[:, ypos_off], name="y"),
+            pd.Series(h_data[:, scale_off], name="scale"),
+            pd.Series(h_data[:, sharpness_off], name="sharpness"),
+            pd.Series(h_data[:, edgeness_off], name="edgeness"),
+            pd.Series(h_data[:, orientation_off], name="orientation"),
+            pd.Series(h_data[:, score_off], name="score"),
+            pd.Series(h_data[:, ambiguity_off], name="ambiguity"),
+            pd.Series(match_data, name = "match"),
+            pd.Series(h_data[:, match_xpos_off], name="match_xpos"),
+            pd.Series(h_data[:, match_ypos_off], name="match_ypos"),
+            pd.Series(h_data[:, match_error_off], name="match_error"),
+            pd.Series(h_data[:, subsampling_off], name="subsampling")
             ), axis=1), h_data[:, -128:]
 
     @staticmethod
@@ -385,8 +420,8 @@ cdef class PySiftData:
         Set a SiftData from a data frame and feature vector
 
         data_frame : DataFrame
-                     a Pandas data frame with the per-keypoint fields:
-                     xpos, ypos, scale, sharpness, edgeness, orientation, score
+                     a pd data frame with the per-keypoint fields:
+                     x, y, scale, sharpness, edgeness, orientation, score
                      and ambiguity
         features : ndarray
                    (n,128) array of SIFT features
@@ -414,8 +449,8 @@ cdef class PySiftData:
         orientation_off = <size_t>(&pts.orientation - <float *>pts)
         score_off = <size_t>(&pts.score - <float *>pts)
         ambiguity_off = <size_t>(&pts.ambiguity - <float *>pts)
-        tmp[:, xpos_off] = data_frame.xpos.as_matrix()
-        tmp[:, ypos_off] = data_frame.ypos.as_matrix()
+        tmp[:, xpos_off] = data_frame.x.as_matrix()
+        tmp[:, ypos_off] = data_frame.y.as_matrix()
         tmp[:, scale_off] = data_frame.scale.as_matrix()
         tmp[:, sharpness_off] = data_frame.sharpness.as_matrix()
         tmp[:, edgeness_off] = data_frame.edgeness.as_matrix()
@@ -437,7 +472,7 @@ def ExtractKeypoints(np.ndarray srcImage,
                      float initBlur = 0,
                      float thresh = 5,
                      float lowestScale = 0,
-                     float subsampling = 1.0):
+                     bool scaleUp = False):
     """
     Extract keypoints from an image
 
@@ -485,7 +520,7 @@ def ExtractKeypoints(np.ndarray srcImage,
     del tmp
     with nogil:
         ExtractSift(pySiftData.data, destImage, numOctaves, initBlur, thresh,
-                    lowestScale, subsampling)
+                    lowestScale, scaleUp)
 
 cdef class PyCudaImage(object):
     """
@@ -503,8 +538,9 @@ cdef class PyCudaImage(object):
             destImage.Allocate(size_x, size_y, iAlignUp(size_x, 128),
                                False, NULL, <float *>pSrc)
             destImage.Download()
-        print('Downloaded')
         del tmp
+
+
 
 def PyMatchSiftData(PySiftData data1, PySiftData data2):
     """

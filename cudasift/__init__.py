@@ -8,6 +8,6 @@ CVIU, 118, pp. 111-127, January 2014.
 '''
 import pyximport; pyximport.install()
 
-from ._cudasift import PyInitCuda, PySiftData, ExtractKeypoints, PyMatchSiftData, PyRadialMean, PyCudaImage, PyDecomposeAndMatch
+from ._cudasift import PyInitCuda, PySiftData, ExtractKeypoints, PyMatchSiftData, PyCudaImage, PyDecomposeAndMatch
 
-all = [PyInitCuda, PySiftData, ExtractKeypoints, PyMatchSiftData, PyRadialMean, PyCudaImage, PyDecomposeAndMatch]
+all = [PyInitCuda, PySiftData, ExtractKeypoints, PyMatchSiftData, PyCudaImage, PyDecomposeAndMatch]
